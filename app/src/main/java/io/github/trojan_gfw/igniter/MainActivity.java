@@ -1,80 +1,163 @@
 package io.github.trojan_gfw.igniter;
 
 
-import android.app.Activity;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.content.BroadcastReceiver;
-import android.content.Context;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.DialogInterface;
 import android.content.Intent;
-import android.content.IntentFilter;
+import android.net.Uri;
 import android.net.VpnService;
-import android.os.Build;
 import android.os.Bundle;
-import android.support.annotation.Nullable;
-import android.support.v4.content.LocalBroadcastManager;
-import android.support.v7.app.AppCompatActivity;
-import android.text.method.LinkMovementMethod;
+import android.os.RemoteException;
+import android.text.InputType;
+import android.view.GestureDetector;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.Switch;
-import android.widget.TextView;
 import android.widget.Toast;
+
+import androidx.activity.result.ActivityResult;
+import androidx.activity.result.ActivityResultCallback;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 
+import io.github.trojan_gfw.igniter.common.constants.Constants;
+import io.github.trojan_gfw.igniter.common.os.Task;
+import io.github.trojan_gfw.igniter.common.os.Threads;
+import io.github.trojan_gfw.igniter.common.utils.AnimationUtils;
+import io.github.trojan_gfw.igniter.common.utils.DisplayUtils;
+import io.github.trojan_gfw.igniter.common.utils.PreferenceUtils;
+import io.github.trojan_gfw.igniter.common.utils.SnackbarUtils;
+import io.github.trojan_gfw.igniter.connection.TrojanConnection;
+import io.github.trojan_gfw.igniter.exempt.activity.ExemptAppActivity;
+import io.github.trojan_gfw.igniter.proxy.aidl.ITrojanService;
+import io.github.trojan_gfw.igniter.servers.activity.ServerListActivity;
+import io.github.trojan_gfw.igniter.servers.data.ServerListDataManager;
+import io.github.trojan_gfw.igniter.servers.data.ServerListDataSource;
+import io.github.trojan_gfw.igniter.tile.ProxyHelper;
 
-public class MainActivity extends AppCompatActivity {
 
-    private static final int VPN_REQUEST_CODE = 0;
+public class MainActivity extends AppCompatActivity implements TrojanConnection.Callback {
+    private static final String TAG = "MainActivity";
+    private static final int READ_WRITE_EXT_STORAGE_PERMISSION_REQUEST = 514;
+    private static final int VPN_REQUEST_CODE = 233;
+    private static final int SERVER_LIST_CHOOSE_REQUEST_CODE = 1024;
+    private static final int EXEMPT_APP_CONFIGURE_REQUEST_CODE = 2077;
     private static final String CONNECTION_TEST_URL = "https://www.google.com";
 
+    private String shareLink;
+    private ViewGroup rootViewGroup;
+    private EditText remoteServerRemarkText;
     private EditText remoteAddrText;
+    private EditText remoteServerSNIText;
     private EditText remotePortText;
     private EditText passwordText;
     private Switch ipv6Switch;
     private Switch verifySwitch;
     private Switch clashSwitch;
-    private TextView clashLink;
+    private Switch allowLanSwitch;
     private Button startStopButton;
     private EditText trojanURLText;
+    private @ProxyService.ProxyState
+    int proxyState = ProxyService.STATE_NONE;
+    private final TrojanConnection connection = new TrojanConnection(false);
+    private final Object lock = new Object();
+    private volatile ITrojanService trojanService;
+    private ServerListDataSource serverListDataManager;
+    private AlertDialog linkDialog;
+    private ActivityResultLauncher<Intent> goToServerListActivityResultLauncher;
+    private ActivityResultLauncher<Intent> exemptAppSettingsActivityResultLauncher;
+    private ActivityResultLauncher<Intent> startProxyActivityResultLauncher;
 
-    private BroadcastReceiver serviceStateReceiver;
-
-    private void createNotificationChannel(String channelId) {
-        // Create the NotificationChannel, but only on API 26+ because
-        // the NotificationChannel class is new and not in the support library
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            CharSequence name = getString(R.string.notification_channel_name);
-            String description = getString(R.string.notification_channel_description);
-            int importance = NotificationManager.IMPORTANCE_HIGH;
-            NotificationChannel channel = new NotificationChannel(channelId, name, importance);
-            channel.setDescription(description);
-            // Register the channel with the system; you can't change the importance
-            // or other notification behaviors after this
-            NotificationManager notificationManager = getSystemService(NotificationManager.class);
-            notificationManager.createNotificationChannel(channel);
+    private TextViewListener remoteServerRemarkTextListener = new TextViewListener() {
+        @Override
+        protected void onTextChanged(String before, String old, String aNew, String after) {
+            // update TextView
+            startUpdates(); // to prevent infinite loop.
+            if (remoteServerRemarkText.hasFocus()) {
+                TrojanConfig ins = Globals.getTrojanConfigInstance();
+                ins.setRemoteServerRemark(remoteServerRemarkText.getText().toString());
+            }
+            endUpdates();
         }
-    }
+    };
 
-    private void destoryNotificationChannel(String channelId) {
-        // Create the NotificationChannel, but only on API 26+ because
-        // the NotificationChannel class is new and not in the support library
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // Register the channel with the system; you can't change the importance
-            // or other notification behaviors after this
-            NotificationManager notificationManager = getSystemService(NotificationManager.class);
-            notificationManager.deleteNotificationChannel(channelId);
+    private TextViewListener remoteAddrTextListener = new TextViewListener() {
+        @Override
+        protected void onTextChanged(String before, String old, String aNew, String after) {
+            // update TextView
+            startUpdates(); // to prevent infinite loop.
+            if (remoteAddrText.hasFocus()) {
+                TrojanConfig ins = Globals.getTrojanConfigInstance();
+                String remoteAddrRawStr = remoteAddrText.getText().toString();
+                ins.setRemoteAddr(remoteAddrRawStr.trim());
+            }
+            endUpdates();
         }
-    }
+    };
+
+    private TextViewListener remoteServerSNITextListener = new TextViewListener() {
+        @Override
+        protected void onTextChanged(String before, String old, String aNew, String after) {
+            // update TextView
+            startUpdates(); // to prevent infinite loop.
+            if (remoteServerSNIText.hasFocus()) {
+                TrojanConfig ins = Globals.getTrojanConfigInstance();
+                String remoteServerSNIRawStr = remoteServerSNIText.getText().toString();
+                ins.setSNI(remoteServerSNIRawStr.trim());
+            }
+            endUpdates();
+        }
+    };
+
+    private TextViewListener remotePortTextListener = new TextViewListener() {
+        @Override
+        protected void onTextChanged(String before, String old, String aNew, String after) {
+            // update TextView
+            startUpdates(); // to prevent infinite loop.
+            if (remotePortText.hasFocus()) {
+                TrojanConfig ins = Globals.getTrojanConfigInstance();
+                String portStr = remotePortText.getText().toString();
+                try {
+                    int port = Integer.parseInt(portStr);
+                    ins.setRemotePort(port);
+                } catch (NumberFormatException e) {
+                    // Ignore when we get invalid number
+                    e.printStackTrace();
+                }
+            }
+            endUpdates();
+        }
+    };
+    private TextViewListener passwordTextListener = new TextViewListener() {
+        @Override
+        protected void onTextChanged(String before, String old, String aNew, String after) {
+            // update TextView
+            startUpdates(); // to prevent infinite loop.
+            if (passwordText.hasFocus()) {
+                TrojanConfig ins = Globals.getTrojanConfigInstance();
+                ins.setPassword(passwordText.getText().toString());
+            }
+            endUpdates();
+        }
+    };
 
     private void copyRawResourceToDir(int resId, String destPathName, boolean override) {
         File file = new File(destPathName);
@@ -95,6 +178,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updateViews(int state) {
+        proxyState = state;
         boolean inputEnabled;
         switch (state) {
             case ProxyService.STARTING: {
@@ -122,66 +206,133 @@ public class MainActivity extends AppCompatActivity {
                 break;
             }
         }
+        remoteServerRemarkText.setEnabled(inputEnabled);
         remoteAddrText.setEnabled(inputEnabled);
+        remoteServerSNIText.setEnabled(inputEnabled);
         remotePortText.setEnabled(inputEnabled);
         ipv6Switch.setEnabled(inputEnabled);
         passwordText.setEnabled(inputEnabled);
-        trojanURLText.setEnabled(inputEnabled);
         verifySwitch.setEnabled(inputEnabled);
         clashSwitch.setEnabled(inputEnabled);
-        clashLink.setEnabled(inputEnabled);
+        allowLanSwitch.setEnabled(inputEnabled);
+    }
+
+    private void applyConfigInstance(TrojanConfig config) {
+        TrojanConfig ins = Globals.getTrojanConfigInstance();
+        if (config != null) {
+            String remoteServerRemark = config.getRemoteServerRemark();
+            String remoteAddress = config.getRemoteAddr();
+            String remoteServerSNI = config.getSNI();
+            int remotePort = config.getRemotePort();
+            String password = config.getPassword();
+            boolean verifyCert = config.getVerifyCert();
+            boolean enableIpv6 = config.getEnableIpv6();
+
+            ins.setRemoteServerRemark(remoteServerRemark);
+            ins.setSNI(remoteServerSNI);
+            ins.setRemoteAddr(remoteAddress);
+            ins.setRemotePort(remotePort);
+            ins.setPassword(password);
+            ins.setVerifyCert(verifyCert);
+            ins.setEnableIpv6(enableIpv6);
+
+            remoteServerRemarkText.setText(remoteServerRemark);
+            remoteServerSNIText.setText(remoteServerSNI);
+            passwordText.setText(password);
+            remotePortText.setText(String.valueOf(remotePort));
+            remoteAddrText.setText(remoteAddress);
+            remoteAddrText.setSelection(remoteAddrText.length());
+            verifySwitch.setChecked(verifyCert);
+            ipv6Switch.setChecked(enableIpv6);
+        }
     }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
+        final int screenWidth = DisplayUtils.getScreenWidth();
+        if (screenWidth >= 1080) {
+            setContentView(R.layout.activity_main);
+        } else {
+            setContentView(R.layout.activity_main_720);
+        }
+
+        goToServerListActivityResultLauncher = registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
+                new ActivityResultCallback<ActivityResult>() {
+                    @Override
+                    public void onActivityResult(ActivityResult result) {
+                        Intent data = result.getData();
+                        if (result.getResultCode() == RESULT_OK && data != null) {
+                            shareLink = "";
+                            final TrojanConfig selectedConfig = data.getParcelableExtra(ServerListActivity.KEY_TROJAN_CONFIG);
+                            if (selectedConfig != null) {
+                                LogHelper.e("gotoServer: ", selectedConfig.toString());
+
+                                runOnUiThread(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        TrojanConfig ins = Globals.getTrojanConfigInstance();
+                                        ins.setRemoteServerRemark(selectedConfig.getRemoteServerRemark());
+                                        ins.setRemoteAddr(selectedConfig.getRemoteAddr());
+                                        ins.setSNI(selectedConfig.getSNI());
+                                        ins.setRemotePort(selectedConfig.getRemotePort());
+                                        ins.setPassword(selectedConfig.getPassword());
+                                        ins.setEnableIpv6(selectedConfig.getEnableIpv6());
+                                        ins.setVerifyCert(selectedConfig.getVerifyCert());
+                                        TrojanHelper.WriteTrojanConfig(Globals.getTrojanConfigInstance(), Globals.getTrojanConfigPath());
+                                        applyConfigInstance(ins);
+                                    }
+                                });
+                                shareLink = TrojanURLHelper.GenerateTrojanURL(selectedConfig);
+                            }
+                        }
+                    }
+                });
+
+        exemptAppSettingsActivityResultLauncher = registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
+                new ActivityResultCallback<ActivityResult>() {
+                    @Override
+                    public void onActivityResult(ActivityResult result) {
+                        if (result.getResultCode() == RESULT_OK) {
+                            if (ProxyService.STARTED == proxyState) {
+                                SnackbarUtils.showTextLong(rootViewGroup, R.string.main_restart_proxy_service_tip);
+                            }
+                        }
+                    }
+                });
+
+        startProxyActivityResultLauncher = registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
+                new ActivityResultCallback<ActivityResult>() {
+                    @Override
+                    public void onActivityResult(ActivityResult result) {
+                        if (result.getResultCode() == RESULT_OK)
+                            ProxyHelper.startProxyService(getApplicationContext());
+                    }
+                });
+
+        rootViewGroup = findViewById(R.id.rootScrollView);
+        remoteServerRemarkText = findViewById(R.id.remoteServerRemarkText);
         remoteAddrText = findViewById(R.id.remoteAddrText);
+        remoteServerSNIText = findViewById(R.id.remoteServerSNIText);
         remotePortText = findViewById(R.id.remotePortText);
         passwordText = findViewById(R.id.passwordText);
-        trojanURLText = findViewById(R.id.trojanURLText);
         ipv6Switch = findViewById(R.id.ipv6Switch);
         verifySwitch = findViewById(R.id.verifySwitch);
         clashSwitch = findViewById(R.id.clashSwitch);
-        clashLink = findViewById(R.id.clashLink);
-        clashLink.setMovementMethod(LinkMovementMethod.getInstance());
+        allowLanSwitch = findViewById(R.id.allowLanSwitch);
         startStopButton = findViewById(R.id.startStopButton);
-
-        Globals.Init(this);
-        createNotificationChannel(getString(R.string.notification_channel_id));
 
         copyRawResourceToDir(R.raw.cacert, Globals.getCaCertPath(), true);
         copyRawResourceToDir(R.raw.country, Globals.getCountryMmdbPath(), true);
         copyRawResourceToDir(R.raw.clash_config, Globals.getClashConfigPath(), false);
 
-        remoteAddrText.addTextChangedListener(new TextViewListener() {
-            @Override
-            protected void onTextChanged(String before, String old, String aNew, String after) {
-                // update TextView
-                startUpdates(); // to prevent infinite loop.
-                TrojanConfig ins = Globals.getTrojanConfigInstance();
-                ins.setRemoteAddr(remoteAddrText.getText().toString());
-                endUpdates();
-            }
-        });
+        remoteServerRemarkText.addTextChangedListener(remoteServerRemarkTextListener);
 
-        remotePortText.addTextChangedListener(new TextViewListener() {
-            @Override
-            protected void onTextChanged(String before, String old, String aNew, String after) {
-                // update TextView
-                startUpdates(); // to prevent infinite loop.
-                TrojanConfig ins = Globals.getTrojanConfigInstance();
-                String portStr = remotePortText.getText().toString();
-                try {
-                    int port = Integer.parseInt(portStr);
-                    ins.setRemotePort(port);
-                } catch (NumberFormatException e) {
-                    // Ignore when we get invalid number
-                    e.printStackTrace();
-                }
-                endUpdates();
-            }
-        });
+        remoteAddrText.addTextChangedListener(remoteAddrTextListener);
+
+        remoteServerSNIText.addTextChangedListener(remoteServerSNITextListener);
+
+        remotePortText.addTextChangedListener(remotePortTextListener);
 
         passwordText.setOnFocusChangeListener(new View.OnFocusChangeListener() {
             @Override
@@ -196,16 +347,37 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        passwordText.addTextChangedListener(new TextViewListener() {
+        boolean enableClash = PreferenceUtils.getBooleanPreference(getContentResolver(),
+                Uri.parse(Constants.PREFERENCE_URI), Constants.PREFERENCE_KEY_ENABLE_CLASH, true);
+        clashSwitch.setChecked(enableClash);
+        clashSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
-            protected void onTextChanged(String before, String old, String aNew, String after) {
-                // update TextView
-                startUpdates(); // to prevent infinite loop.
-                TrojanConfig ins = Globals.getTrojanConfigInstance();
-                ins.setPassword(passwordText.getText().toString());
-                endUpdates();
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                // Generally speaking, it's better to insert content into ContentProvider in background
+                // thread, but that may cause data inconsistency when user starts proxy right after
+                // switching.
+                PreferenceUtils.putBooleanPreference(getContentResolver(),
+                        Uri.parse(Constants.PREFERENCE_URI), Constants.PREFERENCE_KEY_ENABLE_CLASH,
+                        isChecked);
             }
         });
+
+        boolean allowLan = PreferenceUtils.getBooleanPreference(getContentResolver(),
+                Uri.parse(Constants.PREFERENCE_URI), Constants.PREFERENCE_KEY_ALLOW_LAN, false);
+        allowLanSwitch.setChecked(allowLan);
+        allowLanSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                // Generally speaking, it's better to insert content into ContentProvider in background
+                // thread, but that may cause data inconsistency when user starts proxy right after
+                // switching.
+                PreferenceUtils.putBooleanPreference(getContentResolver(),
+                        Uri.parse(Constants.PREFERENCE_URI), Constants.PREFERENCE_KEY_ALLOW_LAN,
+                        isChecked);
+            }
+        });
+
+        passwordText.addTextChangedListener(passwordTextListener);
 
         ipv6Switch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
@@ -223,45 +395,41 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        trojanURLText.setOnLongClickListener(new View.OnLongClickListener() {
-            @Override
-            public boolean onLongClick(View v) {
-                trojanURLText.selectAll();
-                return false;
-            }
-        });
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("Trojan URL");
 
-        trojanURLText.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+        trojanURLText = new EditText(this);
+
+        trojanURLText.setInputType(InputType.TYPE_CLASS_TEXT);
+        trojanURLText.setSingleLine(false);
+        trojanURLText.setSelectAllOnFocus(true);
+
+        FrameLayout container = new FrameLayout(this);
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.leftMargin = getResources().getDimensionPixelSize(R.dimen.dialog_margin);
+        params.rightMargin = getResources().getDimensionPixelSize(R.dimen.dialog_margin);
+        trojanURLText.setLayoutParams(params);
+        container.addView(trojanURLText);
+        builder.setView(container);
+
+        builder.setPositiveButton(R.string.common_update, new DialogInterface.OnClickListener() {
             @Override
-            public void onFocusChange(View v, boolean hasFocus) {
-                if (!hasFocus) {
-                    trojanURLText.setInputType(EditorInfo.TYPE_CLASS_TEXT | EditorInfo.TYPE_TEXT_VARIATION_PASSWORD);
-                } else {
-                    // it seems we don't have to place cursor on the end for Trojan URL
-                    trojanURLText.setInputType(EditorInfo.TYPE_CLASS_TEXT);
+            public void onClick(DialogInterface dialog, int which) {
+                TrojanURLParseResult parseResult = TrojanURLHelper.ParseTrojanURL(trojanURLText.getText().toString());
+                if (parseResult != null) {
+                    Globals.setTrojanConfigInstance(TrojanURLHelper.CombineTrojanURLParseResultToTrojanConfig(parseResult, Globals.getTrojanConfigInstance()));
+                    applyConfigInstance(Globals.getTrojanConfigInstance());
                 }
+                dialog.cancel();
             }
         });
-
-        trojanURLText.addTextChangedListener(new TextViewListener() {
+        builder.setNegativeButton(R.string.common_cancel, new DialogInterface.OnClickListener() {
             @Override
-            protected void onTextChanged(String before, String old, String aNew, String after) {
-                // update TextView
-                startUpdates(); // to prevent infinite loop.
-                TrojanConfig ins = Globals.getTrojanConfigInstance();
-                TrojanConfig parsedConfig = TrojanURLHelper.ParseTrojanURL(before + aNew + after);
-                if (parsedConfig != null) {
-                    String remoteAddress = parsedConfig.getRemoteAddr();
-                    int remotePort = parsedConfig.getRemotePort();
-                    String password = parsedConfig.getPassword();
-
-                    ins.setRemoteAddr(remoteAddress);
-                    ins.setRemotePort(remotePort);
-                    ins.setPassword(password);
-                }
-                endUpdates();
+            public void onClick(DialogInterface dialog, int which) {
+                dialog.cancel();
             }
         });
+        linkDialog = builder.create();
 
         TextViewListener trojanConfigChangedTextViewListener = new TextViewListener() {
             @Override
@@ -269,65 +437,250 @@ public class MainActivity extends AppCompatActivity {
                 startUpdates();
                 String str = TrojanURLHelper.GenerateTrojanURL(Globals.getTrojanConfigInstance());
                 if (str != null) {
-                    trojanURLText.setText(str);
+                    shareLink = str;
                 }
                 endUpdates();
             }
         };
 
         remoteAddrText.addTextChangedListener(trojanConfigChangedTextViewListener);
+        remoteServerSNIText.addTextChangedListener(trojanConfigChangedTextViewListener);
         remotePortText.addTextChangedListener(trojanConfigChangedTextViewListener);
         passwordText.addTextChangedListener(trojanConfigChangedTextViewListener);
 
         startStopButton.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
-
                 if (!Globals.getTrojanConfigInstance().isValidRunningConfig()) {
                     Toast.makeText(MainActivity.this,
                             R.string.invalid_configuration,
                             Toast.LENGTH_LONG).show();
                     return;
                 }
-
-                ProxyService serviceInstance = ProxyService.getInstance();
-                if (serviceInstance == null) {
+                if (proxyState == ProxyService.STATE_NONE || proxyState == ProxyService.STOPPED) {
                     TrojanHelper.WriteTrojanConfig(
                             Globals.getTrojanConfigInstance(),
                             Globals.getTrojanConfigPath()
                     );
                     TrojanHelper.ShowConfig(Globals.getTrojanConfigPath());
-
+                    // start ProxyService
                     Intent i = VpnService.prepare(getApplicationContext());
                     if (i != null) {
-                        startActivityForResult(i, VPN_REQUEST_CODE);
+                        startProxyActivityResultLauncher.launch(i);
                     } else {
-                        onActivityResult(VPN_REQUEST_CODE, Activity.RESULT_OK, null);
+                        ProxyHelper.startProxyService(getApplicationContext());
                     }
-                } else {
-                    serviceInstance.stop();
+                } else if (proxyState == ProxyService.STARTED) {
+                    // stop ProxyService
+                    ProxyHelper.stopProxyService(getApplicationContext());
                 }
-
             }
         });
-
-        serviceStateReceiver = new BroadcastReceiver() {
+        serverListDataManager = new ServerListDataManager(Globals.getTrojanConfigListPath(), false, "", 0L);
+        connection.connect(this, this);
+        Threads.instance().runOnWorkThread(new Task() {
             @Override
-            public void onReceive(Context context, Intent intent) {
-                int state = intent.getIntExtra(ProxyService.STATUS_EXTRA_NAME, ProxyService.STARTED);
-                updateViews(state);
+            public void onRun() {
+                PreferenceUtils.putBooleanPreference(getContentResolver(),
+                        Uri.parse(Constants.PREFERENCE_URI),
+                        Constants.PREFERENCE_KEY_FIRST_START, false);
             }
-        };
+        });
+        View horseIv = findViewById(R.id.imageView);
+        GestureDetector gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+            @Override
+            public boolean onDown(MotionEvent e) {
+                return true;
+            }
 
+            @Override
+            public boolean onDoubleTap(MotionEvent e) {
+                swayTheHorse();
+                return true;
+            }
+        });
+        horseIv.setOnTouchListener((v, event) -> gestureDetector.onTouchEvent(event));
+    }
+
+    private void swayTheHorse() {
+        View v = findViewById(R.id.imageView);
+        v.clearAnimation();
+        AnimationUtils.sway(v, 60f, 500L, 4f);
     }
 
     @Override
-    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == VPN_REQUEST_CODE && resultCode == Activity.RESULT_OK) {
-            Intent intent = new Intent(this, ProxyService.class);
-            intent.putExtra(ProxyService.CLASH_EXTRA_NAME, clashSwitch.isChecked());
-            startService(intent);
+    protected void onResume() {
+        super.onResume();
+        checkTrojanURLFromClipboard();
+    }
+
+    private void checkTrojanURLFromClipboard() {
+        Threads.instance().runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                final ClipboardManager clipboardManager = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                if (!clipboardManager.hasPrimaryClip()) {
+                    return;
+                }
+                ClipData clipData = clipboardManager.getPrimaryClip();
+                // check clipboard
+                if (clipData == null || clipData.getItemCount() == 0) {
+                    return;
+                }
+                final CharSequence clipboardText = clipData.getItemAt(0).coerceToText(MainActivity.this);
+                // check scheme
+                TrojanURLParseResult parseResult = TrojanURLHelper.ParseTrojanURL(clipboardText.toString());
+                if (parseResult == null) {
+                    return;
+                }
+
+                // show once if trojan url
+                if (clipboardManager.hasPrimaryClip()) {
+                    clipboardManager.setPrimaryClip(ClipData.newPlainText("", ""));
+                }
+                new AlertDialog.Builder(MainActivity.this)
+                        .setMessage(R.string.clipboard_import_tip)
+                        .setPositiveButton(R.string.common_confirm, new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                TrojanConfig newConfig = TrojanURLHelper.CombineTrojanURLParseResultToTrojanConfig(parseResult, Globals.getTrojanConfigInstance());
+                                Globals.setTrojanConfigInstance(newConfig);
+                                applyConfigInstance(newConfig);
+                            }
+                        })
+                        .setNegativeButton(R.string.common_cancel, null)
+                        .create()
+                        .show();
+            }
+        });
+    }
+
+    @Override
+    public void onServiceConnected(final ITrojanService service) {
+        LogHelper.i(TAG, "onServiceConnected");
+        synchronized (lock) {
+            trojanService = service;
         }
+        Threads.instance().runOnWorkThread(new Task() {
+            @Override
+            public void onRun() {
+                try {
+                    final int state = service.getState();
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            updateViews(state);
+                        }
+                    });
+                } catch (RemoteException e) {
+                    e.printStackTrace();
+                }
+            }
+        });
+    }
+
+    @Override
+    public void onServiceDisconnected() {
+        LogHelper.i(TAG, "onServiceConnected");
+        synchronized (lock) {
+            trojanService = null;
+        }
+    }
+
+    @Override
+    public void onStateChanged(int state, String msg) {
+        LogHelper.i(TAG, "onStateChanged# state: " + state + " msg: " + msg);
+        updateViews(state);
+    }
+
+    @Override
+    public void onTestResult(final String testUrl, final boolean connected, final long delay, @NonNull final String error) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                showTestConnectionResult(testUrl, connected, delay, error);
+            }
+        });
+    }
+
+    private void showTestConnectionResult(String testUrl, boolean connected, long delay, @NonNull String error) {
+        if (connected) {
+            Toast.makeText(getApplicationContext(), getString(R.string.connected_to__in__ms,
+                    testUrl, String.valueOf(delay)), Toast.LENGTH_LONG).show();
+        } else {
+            LogHelper.e(TAG, "TestError: " + error);
+            Toast.makeText(getApplicationContext(),
+                    getString(R.string.failed_to_connect_to__,
+                            testUrl, error),
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
+    public void onBinderDied() {
+        LogHelper.i(TAG, "onBinderDied");
+        connection.disconnect(this);
+        // connect the new binder
+        // todo is it necessary to re-connect?
+        connection.connect(this, this);
+    }
+
+    /**
+     * Test connection by invoking {@link ITrojanService#testConnection(String)}. Since {@link ITrojanService}
+     * is from remote process, a {@link RemoteException} might be thrown. Test result will be delivered
+     * to {@link #onTestResult(String, boolean, long, String)} by {@link TrojanConnection}.
+     */
+    private void testConnection() {
+        ITrojanService service;
+        synchronized (lock) {
+            service = trojanService;
+        }
+        if (service == null) {
+            showTestConnectionResult(CONNECTION_TEST_URL, false, 0L, getString(R.string.trojan_service_not_available));
+        } else {
+            try {
+                service.testConnection(CONNECTION_TEST_URL);
+            } catch (RemoteException e) {
+                showTestConnectionResult(CONNECTION_TEST_URL, false, 0L, getString(R.string.trojan_service_error));
+                e.printStackTrace();
+            }
+        }
+    }
+
+    /**
+     * Show develop info in Logcat by invoking {@link ITrojanService#showDevelopInfoInLogcat}. Since {@link ITrojanService}
+     * is from remote process, a {@link RemoteException} might be thrown.
+     */
+    private void showDevelopInfoInLogcat() {
+        ITrojanService service;
+        synchronized (lock) {
+            service = trojanService;
+        }
+        if (service != null) {
+            try {
+                service.showDevelopInfoInLogcat();
+            } catch (RemoteException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private void clearEditTextFocus() {
+        remoteServerRemarkText.clearFocus();
+        remoteAddrText.clearFocus();
+        remoteServerSNIText.clearFocus();
+        remotePortText.clearFocus();
+        passwordText.clearFocus();
+    }
+
+    private void showSaveConfigResult(final boolean success) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Toast.makeText(getApplicationContext(),
+                        success ? R.string.main_save_success : R.string.main_save_failed,
+                        Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 
     @Override
@@ -342,11 +695,43 @@ public class MainActivity extends AppCompatActivity {
         // Bind menu items to their relative actions
         switch (item.getItemId()) {
             case R.id.action_test_connection:
-                new TestConnection(MainActivity.this).execute(CONNECTION_TEST_URL);
+                testConnection();
                 return true;
             case R.id.action_show_develop_info_logcat:
-                util.Util.logGoRoutineCount();
-                util.Util.logGoroutineStackTrace();
+                // log of this process
+                LogHelper.showDevelopInfoInLogcat();
+                // log of other processes
+                showDevelopInfoInLogcat();
+                return true;
+            case R.id.action_save_profile:
+                if (!Globals.getTrojanConfigInstance().isValidRunningConfig()) {
+                    Toast.makeText(MainActivity.this, R.string.invalid_configuration, Toast.LENGTH_SHORT).show();
+                    return true;
+                }
+                Threads.instance().runOnWorkThread(new Task() {
+                    @Override
+                    public void onRun() {
+                        TrojanConfig config = Globals.getTrojanConfigInstance();
+                        TrojanHelper.WriteTrojanConfig(config, Globals.getTrojanConfigPath());
+                        serverListDataManager.saveServerConfig(config);
+                        showSaveConfigResult(true);
+                    }
+                });
+                return true;
+            case R.id.action_view_server_list:
+                gotoServerList();
+                return true;
+            case R.id.action_about:
+                clearEditTextFocus();
+                startActivity(AboutActivity.create(MainActivity.this));
+                return true;
+            case R.id.action_share_link:
+                trojanURLText.setText(shareLink);
+                linkDialog.show();
+                trojanURLText.selectAll();
+                return true;
+            case R.id.action_exempt_app:
+                exemptAppSettingsActivityResultLauncher.launch(ExemptAppActivity.create(this));
                 return true;
             default:
                 // Invoke the superclass to handle it.
@@ -354,50 +739,42 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    @Override
-    protected void onResume() {
-        super.onResume();
-        File file = new File(Globals.getTrojanConfigPath());
-        if (file.exists()) {
-            try {
-                try (FileInputStream fis = new FileInputStream(file)) {
-                    byte[] content = new byte[(int) file.length()];
-                    fis.read(content);
-                    String contentStr = new String(content);
-                    TrojanConfig ins = Globals.getTrojanConfigInstance();
-                    ins.fromJSON(contentStr);
+    private void gotoServerList() {
+        clearEditTextFocus();
 
-                    remoteAddrText.setText(ins.getRemoteAddr());
-                    remotePortText.setText(String.valueOf(ins.getRemotePort()));
-                    passwordText.setText(ins.getPassword());
-                    ipv6Switch.setChecked(ins.getEnableIpv6());
-                    verifySwitch.setChecked(ins.getVerifyCert());
-                }
-            } catch (Exception e) {
+        boolean proxyOn = false;
+        String proxyHost = null;
+        long proxyPort = 0L;
+        ITrojanService service;
+        synchronized (lock) {
+            service = trojanService;
+        }
+        if (service != null) {
+            try {
+                proxyOn = service.getState() == ProxyService.STARTED;
+                proxyHost = service.getProxyHost();
+                proxyPort = service.getProxyPort();
+            } catch (RemoteException e) {
                 e.printStackTrace();
             }
         }
 
-        ProxyService serviceInstance = ProxyService.getInstance();
-        if (serviceInstance == null) {
-            updateViews(ProxyService.STOPPED);
-        } else {
-            updateViews(serviceInstance.getState());
-            clashSwitch.setChecked(serviceInstance.enable_clash);
+        goToServerListActivityResultLauncher.launch(ServerListActivity.create(MainActivity.this,
+                proxyOn, proxyHost, proxyPort));
+    }
+
+    @Override
+    protected void onPostCreate(@Nullable Bundle savedInstanceState) {
+        super.onPostCreate(savedInstanceState);
+        TrojanConfig cachedConfig = TrojanHelper.readTrojanConfig(Globals.getTrojanConfigPath());
+        if (cachedConfig != null) {
+            applyConfigInstance(cachedConfig);
         }
     }
 
     @Override
-    protected void onStart() {
-        super.onStart();
-        LocalBroadcastManager.getInstance(this).registerReceiver(
-                serviceStateReceiver, new IntentFilter(getString(R.string.bc_service_state))
-        );
-    }
-
-    @Override
-    protected void onStop() {
-        super.onStop();
-        LocalBroadcastManager.getInstance(this).unregisterReceiver(serviceStateReceiver);
+    protected void onDestroy() {
+        super.onDestroy();
+        connection.disconnect(this);
     }
 }

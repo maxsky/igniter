@@ -1,15 +1,22 @@
 package io.github.trojan_gfw.igniter;
 
+import android.os.Parcel;
+import android.os.Parcelable;
 import android.text.TextUtils;
+
+import androidx.annotation.Nullable;
+
+import com.google.gson.Gson;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-public class TrojanConfig {
+public class TrojanConfig implements Parcelable {
 
     private String localAddr;
     private int localPort;
     private String remoteAddr;
+    private String remoteServerRemark;
     private int remotePort;
     private String password;
     private boolean verifyCert;
@@ -17,9 +24,10 @@ public class TrojanConfig {
     private boolean enableIpv6;
     private String cipherList;
     private String tls13CipherList;
+    private String SNI;
 
 
-    TrojanConfig() {
+    public TrojanConfig() {
         // defaults
         this.localAddr = "127.0.0.1";
         this.localPort = 1081;
@@ -43,13 +51,43 @@ public class TrojanConfig {
         this.tls13CipherList = "TLS_AES_128_GCM_SHA256:"
                 + "TLS_CHACHA20_POLY1305_SHA256:"
                 + "TLS_AES_256_GCM_SHA384";
+        this.SNI = "";
+        this.caCertPath = Globals.getCaCertPath();
     }
+
+    protected TrojanConfig(Parcel in) {
+        localAddr = in.readString();
+        localPort = in.readInt();
+        remoteServerRemark = in.readString();
+        remoteAddr = in.readString();
+        remotePort = in.readInt();
+        password = in.readString();
+        verifyCert = in.readByte() != 0;
+        caCertPath = in.readString();
+        enableIpv6 = in.readByte() != 0;
+        cipherList = in.readString();
+        tls13CipherList = in.readString();
+        SNI = in.readString();
+    }
+
+    public static final Creator<TrojanConfig> CREATOR = new Creator<TrojanConfig>() {
+        @Override
+        public TrojanConfig createFromParcel(Parcel in) {
+            return new TrojanConfig(in);
+        }
+
+        @Override
+        public TrojanConfig[] newArray(int size) {
+            return new TrojanConfig[size];
+        }
+    };
 
     public String generateTrojanConfigJSON() {
         try {
             return new JSONObject()
                     .put("local_addr", this.localAddr)
                     .put("local_port", this.localPort)
+                    .put("remote_server_remark", this.remoteServerRemark)
                     .put("remote_addr", this.remoteAddr)
                     .put("remote_port", this.remotePort)
                     .put("password", new JSONArray().put(password))
@@ -59,7 +97,8 @@ public class TrojanConfig {
                             .put("cert", this.caCertPath)
                             .put("cipher", this.cipherList)
                             .put("cipher_tls13", this.tls13CipherList)
-                            .put("alpn", new JSONArray().put("h2").put("http/1.1")))
+                            .put("alpn", new JSONArray().put("h2").put("http/1.1"))
+                            .put("sni", this.SNI))
                     .put("enable_ipv6", this.enableIpv6)
                     .toString();
         } catch (Exception e) {
@@ -73,15 +112,34 @@ public class TrojanConfig {
             JSONObject json = new JSONObject(jsonStr);
             this.setLocalAddr(json.getString("local_addr"))
                     .setLocalPort(json.getInt("local_port"))
+                    .setRemoteServerRemark(json.optString("remote_server_remark"))
                     .setRemoteAddr(json.getString("remote_addr"))
                     .setRemotePort(json.getInt("remote_port"))
                     .setPassword(json.getJSONArray("password").getString(0))
                     .setEnableIpv6(json.getBoolean("enable_ipv6"))
-                    .setVerifyCert(json.getJSONObject("ssl").getBoolean("verify"));
+                    .setVerifyCert(json.getJSONObject("ssl").getBoolean("verify"))
+                    .setSNI(json.getJSONObject("ssl").getString("sni"));
 
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    public void copyFrom(TrojanConfig that) {
+        this
+                .setLocalAddr(that.localAddr)
+                .setLocalPort(that.localPort)
+                .setRemoteServerRemark(that.remoteServerRemark)
+                .setRemoteAddr(that.remoteAddr)
+                .setRemotePort(that.remotePort)
+                .setPassword(that.password)
+                .setEnableIpv6(that.enableIpv6)
+                .setVerifyCert(that.verifyCert)
+                .setCaCertPath(that.caCertPath)
+                .setCipherList(that.cipherList)
+                .setTls13CipherList(that.tls13CipherList)
+                .setSNI(that.SNI);
+
     }
 
     public boolean isValidRunningConfig() {
@@ -106,6 +164,20 @@ public class TrojanConfig {
     public TrojanConfig setLocalPort(int localPort) {
         this.localPort = localPort;
         return this;
+    }
+
+    public String getRemoteServerRemark() {
+        return remoteServerRemark;
+    }
+
+    public TrojanConfig setRemoteServerRemark(String remoteServerRemark) {
+        this.remoteServerRemark = remoteServerRemark;
+        return this;
+    }
+
+    public String getIdentifier() {
+        // The type of RemoteAddress doesn't affect the result, whether it's IPv4/IPv6/Domain
+        return getRemoteAddr() + ":" + getRemotePort();
     }
 
     public String getRemoteAddr() {
@@ -178,5 +250,66 @@ public class TrojanConfig {
     public TrojanConfig setTls13CipherList(String tls13CipherList) {
         this.tls13CipherList = tls13CipherList;
         return this;
+    }
+
+    public String getSNI() {
+        return SNI;
+    }
+
+    public TrojanConfig setSNI(String sni) {
+        this.SNI = sni;
+        return this;
+    }
+
+    @Override
+    public boolean equals(@Nullable Object obj) {
+        if (!(obj instanceof TrojanConfig)) {
+            return false;
+        }
+        TrojanConfig that = (TrojanConfig) obj;
+        return (paramEquals(remoteServerRemark, that.remoteServerRemark) &&
+                paramEquals(remoteAddr, that.remoteAddr) && paramEquals(remotePort, that.remotePort)
+                && paramEquals(localAddr, that.localAddr) && paramEquals(localPort, that.localPort))
+                && paramEquals(password, that.password) && paramEquals(verifyCert, that.verifyCert)
+                && paramEquals(caCertPath, that.caCertPath) && paramEquals(enableIpv6, that.enableIpv6)
+                && paramEquals(cipherList, that.cipherList) && paramEquals(tls13CipherList, that.tls13CipherList)
+                && paramEquals(SNI, that.SNI);
+    }
+
+    private static boolean paramEquals(Object a, Object b) {
+        if (a == b) {
+            return true;
+        }
+        if (a == null || b == null) {
+            return false;
+        }
+        return a.equals(b);
+    }
+
+    @Override
+    public int describeContents() {
+        return 0;
+    }
+
+    @Override
+    public void writeToParcel(Parcel dest, int flags) {
+        dest.writeString(localAddr);
+        dest.writeInt(localPort);
+        dest.writeString(remoteServerRemark);
+        dest.writeString(remoteAddr);
+        dest.writeInt(remotePort);
+        dest.writeString(password);
+        dest.writeByte((byte) (verifyCert ? 1 : 0));
+        dest.writeString(caCertPath);
+        dest.writeByte((byte) (enableIpv6 ? 1 : 0));
+        dest.writeString(cipherList);
+        dest.writeString(tls13CipherList);
+        dest.writeString(SNI);
+    }
+
+    @Override
+    public String toString() {
+        Gson gson = new Gson();
+        return gson.toJson(this);
     }
 }
